@@ -1,0 +1,428 @@
+---
+title: 'results'
+author: 'garezana'
+output: pdf_document
+---
+
+```{r, include=FALSE}
+
+library(ggpubr)
+library(ggplot2)
+library(dplyr)
+library(latex2exp)
+library(gridExtra)
+library(lubridate)
+library(ggnewscale)
+```
+
+##### Note:Data AND Rmd file should be in same folder
+
+```{r WIV dataframe, include=FALSE}
+#Importing data set
+erythrocyteMatureSet = read.csv('gundMatureErys.csv') # Mature erythrocyte summary data
+erythrocyteImmatureSet = read.csv('gundImmatErys.csv') # Immature erythrocyte summary data
+seasonalGundlachiAzuroSet = read.csv('seasonalGundAzuro_dat1.csv') # Seasonal and individual data
+```
+
+```{r seasonaldataformat, include=FALSE}
+# Creating 'Season' and 'infection.status' features, formatting 'Date' to have date format and selecting wanted features
+seasonalGundlachiAzuroDF = seasonalGundlachiAzuroSet %>%
+  dplyr::mutate (
+    Date = as.Date(Date, format = '%m/%d/%y'), 
+    Season = case_when (month(Date) %in% c(6, 7 ,8) ~ 'summer',
+                       (month(Date) %in% c(1, 2, 3)) ~ 'winter' ),
+    infection.status = as.factor(if_else(AZR..Slide. == 1 & Infecciones.PCR == 1, 1,
+                                 if_else(AZR..Slide. == 0 & Infecciones.PCR == 0, 0, NA_real_))) 
+    ) %>%
+  dplyr::select(Date, Season, Spp, UID, Sex, SVL, Weight, infection.status)
+```
+
+```{r data merge, include=FALSE}
+# Merging lizard and seasonal data with erythrocyte to mature erythrocyte summary data
+matureErythrocyteSeasonalDF = merge(erythrocyteMatureSet, seasonalGundlachiAzuroDF, by = 'UID' ) %>% 
+  select(Date, Season, UID, Spp, Sex, SVL, Weight, infection.status,
+         classification, ratio, cellNum, eryMean, erySD, CV)
+
+# Creating ordinal lizard size feature
+matureErythrocyteSeasonalDF = matureErythrocyteSeasonalDF %>%
+  dplyr::mutate(
+    Size = ifelse(Sex == 'F' & SVL <= median(SVL[Sex == 'F'])|
+                  Sex == 'M' & SVL <= median(SVL[Sex == 'M']), 'Small', 
+           ifelse(Sex == 'F' & SVL >  median(SVL[Sex == 'F'])|
+                  Sex == 'M' & SVL >  median(SVL[Sex == 'M']), 'Large', NA)))
+
+```
+
+```{r datasave, include=FALSE}
+# Fix data transcription error in lizard mass
+matureErythrocyteSeasonalDF$Weight[matureErythrocyteSeasonalDF$UID == '1250'] = 9.0 # Wrongly transcribed as 4
+matureErythrocyteSeasonalDF$Weight[matureErythrocyteSeasonalDF$UID == '2183'] = 7.7 # Wrongly transcribed as 2.7
+
+agundlachiWIVc = matureErythrocyteSeasonalDF %>% select(uid = UID, spp = Spp, sex = Sex, mass = Weight, svl = SVL)
+write.csv(agundlachiWIVc, 'agundlachiWIV-09-2021.csv', row.names = F)
+```
+
+```{r BCI Calc, include=FALSE}
+# Creating BCI feature from Weight and SVL data
+matureErythrocyteSeasonalDF = matureErythrocyteSeasonalDF %>%
+  dplyr::mutate(BCI = residuals(lm(log10(Weight) ~ log10(SVL))))
+```
+
+### Model1. BCI predicted by infection status, sex and season
+```{r, echo=FALSE}
+# Training model for BCI prediction
+BCIModel = glm(BCI ~ infection.status + Sex + Season, data = matureErythrocyteSeasonalDF)
+summary(BCIModel)
+```
+
+```{r, include=FALSE}
+
+dataFrameColumnTitles = c('infection.status', 'Sex', 'Season', 'Predicted', 'lower', 'upper', 'se.predict')
+
+# Function to create data frame with model predictions
+getModelPredictionFor <- function(season) {
+  dataFrameBuffer = setNames(data.frame(matrix(ncol = 7, nrow = 0)), dataFrameColumnTitles)
+
+  # Build data frame with model predictions
+  dataFrameBuffer <- rbind(dataFrameBuffer, dataPredictor('0', 'F', season))
+  dataFrameBuffer <- rbind(dataFrameBuffer, dataPredictor('1', 'F', season))
+  dataFrameBuffer <- rbind(dataFrameBuffer, dataPredictor('0', 'M', season))
+  dataFrameBuffer <- rbind(dataFrameBuffer, dataPredictor('1', 'M', season))
+  
+  # Return dataframe with predictions
+  return(dataFrameBuffer)
+}
+
+# Function to predict BCI using model created
+dataPredictor <- function(infectionStatus, sex, season) {
+
+  dataFrameBuffer = setNames(data.frame(matrix(ncol = 7, nrow = 0)), dataFrameColumnTitles)
+
+  # Changing elements in data frame for predictions
+  temporaryDataFrame = data.frame(infection.status = infectionStatus, Sex = sex, Season = season)
+  # Predicted data for data frame
+  predictedData=predict(BCIModel, newdata = temporaryDataFrame, interval = 'confidence', se.fit = T)
+
+  lower = predictedData$fit - 1.96 * predictedData$se.fit
+  upper = predictedData$fit + 1.96 * predictedData$se.fit
+
+  # Create a list with prediction information in expected format to attach into data frame
+  formatData = list(infectionStatus, sex, season, predictedData$fit, lower, upper, predictedData$se.fit)
+
+  # Adding values to new data frame to create plots
+  dataFrameBuffer[nrow(dataFrameBuffer) + 1,] = formatData
+  return(dataFrameBuffer)
+}
+```
+
+```{r, echo=FALSE}
+# Data frames with BCI prediction
+# For winter lizards
+winterAPredictionsDF = getModelPredictionFor('winter')
+# For summer lizards
+summerAPredictionsDF = getModelPredictionFor('summer')
+```
+
+```{r, echo=FALSE}
+# Binding winter and summer predicted BCI data frames
+seasonAPredictionsDF = rbind(summerAPredictionsDF, winterAPredictionsDF)
+knitr::kable(seasonAPredictionsDF, caption = 'Predicted body condition index (BCI) values by infection status')
+```
+
+### Figure 1 
+Predicted partial relationships between infection status and body condition index (BCI) for female and male *A.gundlachi* during the A) 2015 summer and B) 2016 winter season. Grey error bars represent 95 % CI and black error bars represent one standard error.
+
+```{r, echo=FALSE}
+# Plotting winter BCI predictions
+leyendText = expression(paste('Winter', italic(' Anolis gundlachi')))
+winterBCIplot = ggplot(winterAPredictionsDF,
+                        aes(Sex, Predicted, factor = infection.status)) +
+                        geom_errorbar(position = position_dodge(.9), aes(ymin = lower, ymax  = upper),
+                                      width = 0.9, color = 'gray83', size = 2) +
+                        geom_errorbar(position = position_dodge(.9), aes(ymin = Predicted-se.predict, ymax = Predicted + se.predict),
+                                      width = 0.5, color = 'black', size = 2) +
+                        geom_point(position = position_dodge(.9), size = 3, aes(colour = infection.status)) +
+                        labs(y = 'Body Condition Index') +
+                        scale_color_manual(labels = c('Non-Infected', 'Infected'), values = c('#0000FF', '#f09d1d'),
+                                           name = leyendText) +
+                        theme_bw() +
+                        theme(axis.text = element_text(size = 12), axis.title = element_text(size = 14),
+                              legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+                              legend.text.align = 0, axis.title.y = element_blank()) +
+                        scale_x_discrete(labels = c('Female', 'Male')) +
+                        theme(legend.title = element_blank()) +
+                        theme(legend.position = c(0.325, 0.9))
+winterBCIplot2 = winterBCIplot + annotate('text',  x = Inf, y = Inf, label = 'B', vjust = 1.5, hjust = 1.5) +
+                                 scale_y_continuous(breaks = round(c(seq(-.075, 0.050, 0.025)), 3),
+                                                    limits = c(-.060, 0.050))
+```
+
+
+```{r, echo=FALSE}
+# Plotting summer BCI predictions
+leyendText = expression(paste('Summer', italic(' Anolis gundlachi')))
+summerBCIplot = ggplot(summerAPredictionsDF,
+                          aes(Sex, Predicted, factor = infection.status)) +
+                          geom_errorbar(position = position_dodge(.9), aes(ymin = lower, ymax = upper),
+                                        width = 0.9, color = 'gray83', size = 2) +
+                          geom_errorbar(position = position_dodge(.9), aes(ymin = Predicted-se.predict, ymax = Predicted + se.predict),
+                                        width = 0.5, color = 'black', size = 2) +
+                          geom_point(position = position_dodge(.9), size = 3, aes(colour = infection.status)) +
+                          labs(y = 'Body Condition Index') + 
+                          scale_color_manual(labels = c('Non-Infected', 'Infected'), values = c('#0000FF', '#f09d1d'),
+                                             name = leyendText) +
+                          theme_bw() + 
+                          theme(axis.text = element_text(size = 12), axis.title = element_text(size = 14),
+                                legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+                                legend.text.align = 0) +
+                          scale_x_discrete(labels = c('Female', 'Male')) +
+                          theme(legend.position = 'none')
+summerBCIplot2 = summerBCIplot + annotate('text',  x = Inf, y = Inf, label = 'A', vjust = 1.5, hjust = 1.5) +
+                                   scale_y_continuous(breaks = round(c(seq(-.075, 0.050, 0.025)), 3),
+                                                      limits = c(-.060, 0.050))
+```
+
+```{r bciplotsave, eco=FALSE}
+# Saving BCI plot as pdf
+pdf('bcipredictedinfection.pdf')
+grid.arrange(summerBCIplot2, winterBCIplot2 , ncol = 2)
+dev.off()
+grid.arrange(summerBCIplot2, winterBCIplot2, ncol = 2)
+```
+
+### Model2. Probability of infection predicted by CV, season, svl and sex
+
+```{r echo=FALSE}
+# Training model for infection status prediction
+infectionStatusModel = glm(infection.status ~ CV + Season + Sex + SVL, data = matureErythrocyteSeasonalDF, family = binomial(logit))
+summary(infectionStatusModel)
+```
+
+```{r echo=FALSE}
+# Creating empty data frame for infection status prediction
+infectionStatusPredictorCVSexSeasonSvl= function(df, model, cv, sex, season, svl){
+  # New data frame MUST have model parameters as column names so predict works
+  dfBuffer = data.frame(CV = cv, Sex = sex, Season = season, SVL = svl) 
+
+  # Predicting data
+  predictedData = predict(model, newdata = dfBuffer, type = 'response', se.fit = T)
+  # Generating upper and lower CI
+  lower = predictedData$fit - 1.96 * predictedData$se.fit
+  upper = predictedData$fit + 1.96 * predictedData$se.fit
+  # Data frame for plot
+  newDataframe = data.frame(cv, sex, season, svl, predictedData$fit, lower, upper, predictedData$se.fit)
+  names(newDataframe) = c('genCV', 'Sex', 'Season', 'SVL', 'predPI', 'lower', 'upper', 'se.predict')
+  df = rbind(df, newDataframe)
+  return(df)
+}
+```
+
+```{r echo=FALSE}
+# Function to return data from specified sex and season
+queryDataFrameData = function(df, sex, season)
+{
+  return(df[matureErythrocyteSeasonalDF$Sex == sex & matureErythrocyteSeasonalDF$Season == season])
+}
+
+# Creating empty data frame for infection status prediction
+logitModData = setNames(data.frame(matrix(ncol = 8, nrow = 0)),
+                       c('genCV', 'Sex', 'Season', 'SVL', 'predPI', 'lower', 'upper', 'se.predict'))
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'M', 'winter')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = infectionStatusPredictorCVSexSeasonSvl(
+  logitModData, infectionStatusModel, CVFWaxis , 'M' , 'winter',
+  median(matureErythrocyteSeasonalDF$SVL[matureErythrocyteSeasonalDF$Sex == 'M' & matureErythrocyteSeasonalDF$Season == 'winter'])
+)
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'M', 'summer')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = infectionStatusPredictorCVSexSeasonSvl(
+  logitModData, infectionStatusModel, CVFWaxis , 'M' , 'summer',
+  median(matureErythrocyteSeasonalDF$SVL[matureErythrocyteSeasonalDF$Sex == 'M' & matureErythrocyteSeasonalDF$Season == 'summer'])
+)
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'F', 'winter')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = infectionStatusPredictorCVSexSeasonSvl(
+  logitModData, infectionStatusModel, CVFWaxis , 'F' , 'winter',
+  median(matureErythrocyteSeasonalDF$SVL[matureErythrocyteSeasonalDF$Sex == 'F' & matureErythrocyteSeasonalDF$Season == 'winter'])
+)
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'F', 'summer')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = infectionStatusPredictorCVSexSeasonSvl(
+  logitModData, infectionStatusModel, CVFWaxis , 'F' , 'summer',
+  median(matureErythrocyteSeasonalDF$SVL[matureErythrocyteSeasonalDF$Sex == 'F' & matureErythrocyteSeasonalDF$Season == 'summer'])
+)
+```
+
+```{r, echo=FALSE}
+knitr::kable(logitModData[1:20, ], caption = 'Predicted probability of infection by the coefficient of variation (CV)')
+```
+
+### Figure 2
+
+Predicted relationship between the probability of infection and coefficient of variation (CV) and for female and male *A.gundlachi* during the A) 2015 summer season and B) 2016 winter season. Points represent *A.gundlachi* individual data relating infection status to the coefficient of variation (CV) by snout to vent length (SVL). 
+
+```{r echo=FALSE, out.width='60%'}
+# Function to filter data by season
+filterDFBySeason = function(df, season) {
+  filteredDataFrame = df %>% filter(Season == season)
+  return (filteredDataFrame)
+}
+winterData = filterDFBySeason(logitModData, 'winter')
+summerData = filterDFBySeason(logitModData, 'summer')
+
+originalWinter = filterDFBySeason(matureErythrocyteSeasonalDF, 'winter')
+originalSummer = filterDFBySeason(matureErythrocyteSeasonalDF, 'summer')
+
+infectionStatusWinterplot <- ggplot(winterData, aes(x = genCV, y = predPI, color = Sex)) +
+                                geom_line() + 
+                                theme(axis.text = element_text(size = 12),
+                                      axis.title = element_text(size = 12, face = 'bold')) +
+  
+                                geom_ribbon(aes(ymin = lower, ymax = upper, fill = Sex),
+                                            colour = NA, linetype = 2, alpha = 0.3) + 
+                                labs(x = 'Coefficient of Variation', y = 'Probability of Infection') + 
+                                new_scale_color() + 
+                                geom_point(data = originalWinter, 
+                                           aes(size = SVL, x = CV, y = as.numeric(as.character(infection.status)),
+                                               color = as.factor(Size)), show.legend = FALSE, shape = 1) +
+                                theme(legend.justification = c(0, -0.1)) +
+                                labs(labels = c('Female', 'Male')) +
+                                theme_bw() +
+                                annotate('text',  x = Inf, y = Inf, label = 'A', vjust = 1.5, hjust = 1.5)
+
+infectionStatusSummerplot <- ggplot(summerData, aes(x = genCV, y = predPI, color = Sex)) +
+                                    geom_line(show.legend = FALSE) +
+                                    theme(axis.text = element_text(size=12),
+                                          axis.title=element_text(size=12, face='bold')) +
+                                    geom_ribbon(aes(ymin = lower, ymax = upper, fill = Sex),
+                                                colour = NA, alpha = 0.3, show.legend = FALSE) +
+                                    labs(x = 'Coefficient of Variation', y = 'Probability of Infectionn') +
+                                    theme_bw() +
+                                    new_scale_color() +
+                                    geom_point(data = originalSummer,
+                                               aes(size = SVL, x = CV, y = as.numeric(as.character(infection.status)),
+                                                   color = as.factor(Size)), shape = 1) +
+                                    theme(legend.justification = c(0, 1.15)) +
+                                    scale_color_discrete(guide = 'none') +
+                                    theme_bw() +
+                                    annotate('text',  x = Inf, y = Inf, label = 'B', vjust = 1.5, hjust = 1.5)
+
+pdf('infectionppredictedbyCV.pdf')
+grid.arrange(infectionStatusWinterplot, infectionStatusSummerplot, nrow = 2)
+dev.off()
+grid.arrange(infectionStatusWinterplot, infectionStatusSummerplot, nrow = 2)
+```
+
+Females and males of both summer and winter season displayed an increasing relationship between the probability of infection and the coefficient of variation of erythrocytes. SVL had an estimate of 0.072 \textpm 0.02, while CV has an estimate of 0.36 \textpm  0.12.
+
+### Model3. Body condition index (BCI) predicted by CV, season, and sex
+
+```{r echo=FALSE}
+# Training model for body condition index prediction
+BCIModelwithCV = glm(BCI ~ CV + Season + Sex, data = matureErythrocyteSeasonalDF)
+summary(BCIModelwithCV)
+
+BCIPredictorCVSexSeason= function(df, model, cv, sex, season){
+  # Makes a new data frame which MUST have model parameters as column names so predict works
+  bufferDF = data.frame(CV = cv, Sex = sex, Season = season) 
+
+  # Predicting data
+  predictedData = predict(model, newdata = bufferDF, type = 'response', se.fit = T)
+  #Generating uper and lower CI
+  lower = predictedData$fit - 1.96 * predictedData$se.fit
+  upper = predictedData$fit + 1.96 * predictedData$se.fit
+  # Data frame for plot
+  newDataframe = data.frame(cv, sex, season, predictedData$fit, lower, upper, predictedData$se.fit)
+  names(newDataframe) = c('genCV', 'Sex', 'Season', 'predBCI', 'lower', 'upper', 'se.predict')
+  
+  df = rbind(df, newDataframe)
+  return(df)
+}
+```
+
+```{r echo=FALSE}
+# Creating empty data frames for BCI prediction
+columnTitlesWithCV = c('genCV', 'Sex', 'Season', 'predBCI', 'lower', 'upper', 'se.predict')
+logitModData = setNames(data.frame(matrix(ncol = 8, nrow = 0)), columnTitlesWithCV)
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'M', 'winter')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = BCIPredictorCVSexSeason(logitModData, BCIModelwithCV, CVFWaxis , 'M' , 'winter' )
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'M', 'summer')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = BCIPredictorCVSexSeason(logitModData, BCIModelwithCV, CVFWaxis , 'M' , 'summer' )
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'F', 'winter')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = BCIPredictorCVSexSeason(logitModData, BCIModelwithCV, CVFWaxis, 'F', 'winter')
+
+CVFW  = queryDataFrameData(matureErythrocyteSeasonalDF$CV, 'F', 'summer')
+CVFWaxis = seq(floor(min(CVFW)), ceiling(max(CVFW)), length.out = length(CVFW))
+
+logitModData = BCIPredictorCVSexSeason(logitModData, BCIModelwithCV, CVFWaxis, 'F', 'summer')
+```
+
+```{r, echo=FALSE}
+winterData = filterDFBySeason(logitModData, 'winter')
+summerData = filterDFBySeason(logitModData, 'summer')
+
+originalWinter = filterDFBySeason(matureErythrocyteSeasonalDF, 'winter')
+originalSummer = filterDFBySeason(matureErythrocyteSeasonalDF, 'summer')
+```
+
+### Figure 3
+
+Predicted relationship between the coefficient of variation (CV) and body condition index (BCI) for female and male *A.gundlachi* during the A) 2015 summer season and B) 2016 winter season. Points represent *A.gundlachi* individual data relating the coefficient of variation (CV) to body condition index (BCI).
+
+```{r, echo=FALSE}
+# Plotting winter predicted partial relationships between CV and BCI
+cvWinterPlot <- ggplot(winterData,
+                       aes(x = genCV, y = predBCI, color = Sex)) +
+                       geom_line() +
+                       theme(axis.text = element_text(size = 12),
+                             axis.title = element_text(size = 12, face = 'bold')) +
+                       geom_ribbon(aes(ymin = lower, ymax = upper, fill = Sex),
+                                   colour = NA, linetype = 2, alpha = 0.3) +
+                       labs(x = 'Coefficient of Variation', y = 'Body Condition Index ') +
+                       annotate('text',  x = Inf, y = Inf, label = 'A', vjust = 27, hjust = 1) +
+                       new_scale_color() +
+                       geom_point(data  = originalWinter, aes(x = CV, y = BCI, size=SVL),
+                                  show.legend = FALSE, shape = 1) +
+                       theme(legend.justification = c(0, -.1)) +
+                       labs(labels = c('Female', 'Male')) +
+                       theme_bw() +
+                       scale_size(range = c(0, 4))
+
+cvSummerPlot <- ggplot(summerData,
+                       aes(x = genCV, y = predBCI, color = Sex)) +
+                       geom_line(show.legend = FALSE) +
+                       theme(axis.text = element_text(size = 12),
+                             axis.title = element_text(size = 12, face = 'bold')) +
+                       geom_ribbon(aes(ymin = lower, ymax = upper, fill = Sex),
+                                   colour = NA, alpha = 0.3, show.legend = FALSE) +
+                       labs(x = 'Coefficient of Variation', y = 'Body Condition Index') +
+                       annotate('text',  x = Inf, y = Inf, label = 'B', vjust = 27, hjust = 1) +
+                       theme_bw() +
+                       new_scale_color() +
+                       geom_point(data = originalSummer, aes(x = CV, y = BCI, size = SVL), shape = 1) +
+                       scale_colour_gradient(guide = 'none') +
+                       theme(legend.justification = c(0, 1.15)) +
+                       scale_size(range = c(0, 4))
+
+pdf('CVandBCI.pdf')
+grid.arrange(cvWinterPlot, cvSummerPlot, nrow = 2)
+dev.off()
+grid.arrange(cvWinterPlot, cvSummerPlot, nrow = 2)
+```
